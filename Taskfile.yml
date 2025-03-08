@@ -1,0 +1,11 @@
+version: "3"
+
+dotenv: [".env", "{{.ENV}}/.env.", "{{.HOME}}/.env"]
+
+env:
+  PYTHONPATH: "{{.ROOT_DIR}}/src"
+
+tasks:
+  assignment_1:
+    cmds:
+      - poetry run python src/assignment_1/main.py
