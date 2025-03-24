@@ -1,26 +1,34 @@
-from pathlib import Path
-import numpy as np
 import pandas as pd
+import multiprocessing as mp
+import timer_wraper
+from tqdm import tqdm
+from pathlib import Path
 from geopy import distance as geopy_distance
+
 
 BASE_PATH = Path("~/Projects/bda").expanduser()
 MAX_VESSEL_SPEED = 50.0  # Maximum expected speed in km/h
 
 
-def detect_vessels_anomalies(
+def detect_vessel_anomalies(
     vessel_data: pd.DataFrame,
     max_vessel_speed: float = MAX_VESSEL_SPEED,
-    detect_intrasecond_anomalies: bool = False,
+    return_entire_dataframe: bool = False,
 ) -> pd.DataFrame:
     # Make a copy of the data to avoid modifying the original DataFrame and to be thread-safe
     vessel_data = vessel_data.copy()
+
+    # Cap latitude between -90 and 90
+    vessel_data["Latitude"] = vessel_data["Latitude"].clip(lower=-90, upper=90)
+
+    # Cap longitude between -180 and 180
+    vessel_data["Longitude"] = vessel_data["Longitude"].clip(lower=-180, upper=180)
 
     # Add columns distance, delta_time, and speed
     vessel_data["distance"] = 0.0
     vessel_data["delta_time_seconds"] = 0.0
     vessel_data["delta_time_hours"] = 0.0
     vessel_data["speed"] = 0.0
-    vessel_data["intrasecond_anomaly"] = False
 
     # Rename "# Timestamp" to "Timestamp" and convert to datetime
     vessel_data = vessel_data.rename(columns={"# Timestamp": "Timestamp"})
@@ -30,12 +38,6 @@ def detect_vessels_anomalies(
 
     # Drop duplicate rows
     vessel_data = vessel_data.drop_duplicates()
-
-    if detect_intrasecond_anomalies:
-        # TODO count number or rows and number of unique timestamps
-        pass
-
-    # vessel_data = vessel_data.sort_values(by="Timestamp")
 
     # Calculate distance, time difference, and speed between consecutive points
     for i in range(1, len(vessel_data)):
@@ -68,15 +70,64 @@ def detect_vessels_anomalies(
     )  # Gap greater than 1 hour
 
     # Flag as anomaly if any of the individual anomaly types are detected
-    vessel_data["anomaly"] = (
-        vessel_data["speed_anomaly"]
-        | vessel_data["ais_gap"]
-        | vessel_data["intrasecond_anomaly"]
-    )
+    vessel_data["anomaly"] = vessel_data["speed_anomaly"] | vessel_data["ais_gap"]
+
     # Only keep rows with anomalies
-    # vessel_data = vessel_data[vessel_data["anomaly"]]
+    if not return_entire_dataframe:
+        vessel_data = vessel_data[vessel_data["anomaly"]]
 
     return vessel_data
+
+
+@timer_wraper.timeit
+def detect_vessel_anomalies_single_process(
+    data: pd.DataFrame,
+    max_vessel_speed: float = MAX_VESSEL_SPEED,
+) -> pd.DataFrame:
+    all_anomalies = pd.DataFrame()
+    vessels = data.groupby("MMSI")
+    vessles_ids = list(vessels.groups.keys())
+
+    with tqdm(
+        total=len(vessels.groups), unit="vessel", desc="Processing vessels"
+    ) as pbar:
+        for vessel_id in vessles_ids:
+            anomalies = detect_vessel_anomalies(
+                vessels.get_group(vessel_id), max_vessel_speed
+            )
+            all_anomalies = pd.concat([all_anomalies, anomalies])
+            pbar.update(1)
+
+    return all_anomalies
+
+
+@timer_wraper.timeit
+def detect_vessel_anomalies_multi_process(
+    data: pd.DataFrame,
+    max_vessel_speed: float = MAX_VESSEL_SPEED,
+) -> pd.DataFrame:
+    number_of_processes = max(mp.cpu_count() - 1, 1)
+    print(f"Using {number_of_processes} processes.")
+
+    # Group data by vessel MMSI
+    vessels = data.groupby("MMSI")
+    vessels_data = [(group.copy(), max_vessel_speed) for _, group in vessels]
+
+    # Initialize multiprocessing pool
+    with mp.Pool(number_of_processes) as pool:
+        results = list(
+            tqdm(
+                pool.starmap(detect_vessel_anomalies, vessels_data),
+                total=len(vessels_data),
+                unit="vessel",
+                desc="Processing vessels",
+            )
+        )
+
+    # Combine results from all processes
+    all_anomalies = pd.concat(results, ignore_index=True)
+
+    return all_anomalies
 
 
 def detect_conflicting_locations(data: pd.DataFrame) -> pd.DataFrame: ...
@@ -85,18 +136,23 @@ def detect_conflicting_locations(data: pd.DataFrame) -> pd.DataFrame: ...
 def main():
     # pd.set_option("display.max_columns", None)
     pd.set_option("display.max_rows", None)
+
     data = pd.read_csv(
         BASE_PATH / "assets/test.csv",
         usecols=["# Timestamp", "MMSI", "Latitude", "Longitude", "SOG"],
     )
-    vessels = data.groupby("MMSI")
-    vessles_ids = list(vessels.groups.keys())
 
-    vessel_id = 211718360
-    anomalies = detect_vessels_anomalies(
-        vessels.get_group(vessel_id), detect_intrasecond_anomalies=False
-    )
-    print(anomalies)
+    print(detect_vessel_anomalies_single_process(data))
+    # print(detect_vessel_anomalies_multi_process(data))
+
+    # vessels = data.groupby("MMSI")
+    # vessles_ids = list(vessels.groups.keys())
+
+    # vessel_id = 203504300
+    # anomalies = detect_vessel_anomalies(
+    #     vessels.get_group(vessel_id), return_entire_dataframe=True
+    # )
+    # print(anomalies)
 
     # for vessel_id in vessles_ids:
     #     print(f"Vessel ID: {vessel_id}")
