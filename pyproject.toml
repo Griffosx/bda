@@ -13,6 +13,7 @@ tqdm = "^4.67.1"
 ipykernel = "^6.29.5"
 geopy = "^2.4.1"
 pytest = "^8.3.5"
+networkx = "^3.4.2"
 
 
 [build-system]
