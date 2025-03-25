@@ -2,8 +2,16 @@ import pandas as pd
 import numpy as np
 import multiprocessing as mp
 from tqdm import tqdm
-from functools import partial
+
 from utils.timer_wrapper import timeit
+
+
+DISTANCE_THRESHOLD = 100  # meters
+TIME_THRESHOLD = 30  # seconds
+LAT_BIN_SIZE = 0.01  # ~1km on average
+LON_BIN_SIZE = 0.01  # varies with latitude
+TIME_BIN_SIZE = "1min"
+TIME_BOUNDARY_THRESHOLD = 10  # seconds
 
 
 @timeit
@@ -115,7 +123,10 @@ def preprocess_vessel_spatial_data(
 
 @timeit
 def preprocess_vessel_temporal_data(
-    data, time_bin_size="1min", boundary_threshold=10, overlap=True
+    data,
+    time_bin_size=TIME_BIN_SIZE,
+    time_boundary_threshold=TIME_BOUNDARY_THRESHOLD,
+    overlap=True,
 ):
     """
     Cluster vessel data into temporal bins based on Timestamp.
@@ -181,7 +192,7 @@ def preprocess_vessel_temporal_data(
     # Boundary threshold is already in seconds, so we use it directly
 
     # Check if near boundary
-    data["near_time_boundary"] = data["time_distance"] <= boundary_threshold
+    data["near_time_boundary"] = data["time_distance"] <= time_boundary_threshold
 
     # Create a list to store DataFrames for each case
     result_dfs = []
@@ -215,14 +226,35 @@ def preprocess_vessel_temporal_data(
     return result_df
 
 
-def process_chunk(chunk_data, distance_threshold=None, time_threshold=None):
+def preprocess_data(
+    data,
+    lat_bin_size: float = LAT_BIN_SIZE,
+    lon_bin_size: float = LON_BIN_SIZE,
+    time_bin_size: str = TIME_BIN_SIZE,
+    boundary_threshold: int = TIME_BOUNDARY_THRESHOLD,
+):
+    """
+    Preprocess vessel location data by spatial and temporal binning and create chunks for processing.
+    """
+    data = preprocess_vessel_spatial_data(
+        data, lat_bin_size=lat_bin_size, lon_bin_size=lon_bin_size
+    )
+    data = preprocess_vessel_temporal_data(
+        data, time_bin_size=time_bin_size, time_boundary_threshold=boundary_threshold
+    )
+    # Group by spatial and temporal bins
+    chunks = data.groupby(["lat_bin", "lon_bin", "time_bin"])
+    print(f"Created {len(chunks)} bins.")
+    return chunks
+
+
+def process_chunk(chunk_data):
     """
     Process a chunk of vessel location data to find conflicts with exact position and time matches.
     Highly optimized version that only identifies different vessels (MMSIs) at identical positions.
 
     Parameters:
     chunk_data (pd.DataFrame): DataFrame with vessel location data for a specific bin
-    distance_threshold, time_threshold: Kept for backward compatibility but not used
 
     Returns:
     list: List of dictionaries containing pairs of conflicting vessel records
@@ -299,12 +331,10 @@ def process_chunk(chunk_data, distance_threshold=None, time_threshold=None):
 @timeit
 def detect_conflicting_locations_single_process(
     data: pd.DataFrame,
-    distance_threshold: float = 100,  # meters
-    time_threshold: float = 30,  # seconds
-    lat_bin_size: float = 0.01,  # ~1km on average
-    lon_bin_size: float = 0.01,  # varies with latitude
-    time_bin_size: str = "1min",
-    boundary_threshold: int = 10,
+    lat_bin_size: float = LAT_BIN_SIZE,
+    lon_bin_size: float = LON_BIN_SIZE,
+    time_bin_size: str = TIME_BIN_SIZE,
+    time_boundary_threshold: int = TIME_BOUNDARY_THRESHOLD,
 ) -> pd.DataFrame:
     """
     Detect vessel locations that are suspiciously close in both space and time
@@ -312,25 +342,12 @@ def detect_conflicting_locations_single_process(
 
     Single-process implementation that processes spatial bins sequentially.
 
-    Parameters:
-    data (pd.DataFrame): DataFrame with vessel location data including 'MMSI',
-                        'Timestamp', 'Latitude', 'Longitude' columns
-    distance_threshold (float): Maximum distance in meters to consider conflicting
-    time_threshold (float): Maximum time difference in seconds to consider conflicting
-
     Returns:
     pd.DataFrame: DataFrame with pairs of conflicting vessel locations
     """
-    # Preprocess the data
-    data = preprocess_vessel_spatial_data(
-        data, lat_bin_size=lat_bin_size, lon_bin_size=lon_bin_size
+    chunks = preprocess_data(
+        data, lat_bin_size, lon_bin_size, time_bin_size, time_boundary_threshold
     )
-    data = preprocess_vessel_temporal_data(
-        data, time_bin_size=time_bin_size, boundary_threshold=boundary_threshold
-    )
-    # Group by spatial and temporal bins
-    chunks = data.groupby(["lat_bin", "lon_bin", "time_bin"])
-    print(f"Processing {len(chunks)} bins")
 
     # Initialize results
     all_results = []
@@ -338,9 +355,7 @@ def detect_conflicting_locations_single_process(
     # Process each spatial bin sequentially with progress bar
     with tqdm(total=len(chunks), unit="bin", desc="Processing spatial bins") as pbar:
         for _, chunk_data in chunks:
-            chunk_results = process_chunk(
-                chunk_data, distance_threshold, time_threshold
-            )
+            chunk_results = process_chunk(chunk_data)
             all_results.extend(chunk_results)
             pbar.update(1)
 
@@ -391,10 +406,10 @@ def detect_conflicting_locations_single_process(
 @timeit
 def detect_conflicting_locations_multi_process(
     data: pd.DataFrame,
-    distance_threshold: float = 100,  # meters
-    time_threshold: float = 30,  # seconds
-    lat_bin_size: float = 0.01,  # ~1.1km at equator
-    lon_bin_size: float = 0.01,  # varies with latitude
+    lat_bin_size: float = LAT_BIN_SIZE,
+    lon_bin_size: float = LON_BIN_SIZE,
+    time_bin_size: str = TIME_BIN_SIZE,
+    time_boundary_threshold: int = TIME_BOUNDARY_THRESHOLD,
 ) -> pd.DataFrame:
     """
     Detect vessel locations that are suspiciously close in both space and time
@@ -402,81 +417,78 @@ def detect_conflicting_locations_multi_process(
 
     Multi-process implementation that processes spatial bins in parallel.
 
-    Parameters:
-    data (pd.DataFrame): DataFrame with vessel location data including 'MMSI',
-                        'Timestamp', 'Latitude', 'Longitude' columns
-    distance_threshold (float): Maximum distance in meters to consider conflicting
-    time_threshold (float): Maximum time difference in seconds to consider conflicting
-
     Returns:
     pd.DataFrame: DataFrame with pairs of conflicting vessel locations
     """
-    # Determine the number of processes
+    # Determine number of processes
     number_of_processes = mp.cpu_count() - 1
     print(f"Using {number_of_processes} processes.")
 
-    # Preprocess the data
-    data = preprocess_vessel_spatial_data(data)
-
-    # Group by spatial bins
-    spatial_groups = data.groupby(["lat_bin", "lon_bin"])
-    print(f"Processing {len(spatial_groups)} spatial bins")
-
-    # Prepare data chunks for parallel processing
-    chunks = [group for _, group in spatial_groups]
-
-    # Define the process function with fixed parameters
-    process_fn = partial(
-        process_spatial_chunk,
-        distance_threshold=distance_threshold,
-        time_threshold=time_threshold,
+    chunks = preprocess_data(
+        data, lat_bin_size, lon_bin_size, time_bin_size, time_boundary_threshold
     )
 
-    # Process chunks in parallel
+    # Group by spatial and temporal bins and extract dataframes only
+    chunk_dataframes = []
+    for _, chunk_df in chunks:
+        chunk_dataframes.append(chunk_df)
+
+    print(f"Processing {len(chunk_dataframes)} bins")
+
+    # Initialize multiprocessing pool
     all_results = []
     with mp.Pool(number_of_processes) as pool:
-        # Map function to all chunks
-        results_iter = pool.imap(process_fn, chunks)
+        # Use imap directly with dataframes
+        results_iter = pool.imap(process_chunk, chunk_dataframes)
 
-        # Process results with progress bar
-        with tqdm(total=len(chunks), desc="Processing spatial bins") as pbar:
-            for chunk_results in results_iter:
-                all_results.extend(chunk_results)
+        # Create a progress bar for the total number of chunks
+        with tqdm(
+            total=len(chunk_dataframes), unit="bin", desc="Processing spatial bins"
+        ) as pbar:
+            # Process each result as it completes
+            for result in results_iter:
+                all_results.extend(result)
                 pbar.update(1)
 
-    # If no conflicts found, return empty DataFrame
-    if not all_results:
-        return pd.DataFrame(
-            columns=[
-                "mmsi1",
-                "mmsi2",
-                "lat1",
-                "lon1",
-                "lat2",
-                "lon2",
-                "timestamp1",
-                "timestamp2",
-                "distance_meters",
-                "time_diff_seconds",
-            ]
+    # Convert results to DataFrame
+    if all_results:
+        result_df = pd.DataFrame(all_results)
+
+        # Remove duplicates based on the vessel pairs
+        # Two vessels might conflict multiple times, so create a unique ID for each pair
+        result_df["pair_id"] = result_df.apply(
+            lambda row: tuple(sorted([row["MMSI1"], row["MMSI2"]])), axis=1
         )
 
-    # Convert results to DataFrame
-    result_df = pd.DataFrame(all_results)
+        # Get the conflict with the smallest distance for each pair
+        result_df = result_df.loc[
+            result_df.groupby("pair_id")["DistanceMeters"].idxmin()
+        ]
 
-    # Remove duplicates by standardizing vessel ordering
-    result_df["mmsi_min"] = result_df[["mmsi1", "mmsi2"]].min(axis=1)
-    result_df["mmsi_max"] = result_df[["mmsi1", "mmsi2"]].max(axis=1)
-    result_df["minute1"] = result_df["timestamp1"].dt.floor("min")
-    result_df["minute2"] = result_df["timestamp2"].dt.floor("min")
+        # Drop the helper column
+        result_df = result_df.drop(columns=["pair_id"])
 
-    # Keep only unique combinations
-    result_df = result_df.drop_duplicates(
-        subset=["mmsi_min", "mmsi_max", "minute1", "minute2"]
-    )
+        # Sort results by distance
+        result_df = result_df.sort_values("DistanceMeters")
 
-    # Drop helper columns
-    result_df = result_df.drop(columns=["mmsi_min", "mmsi_max", "minute1", "minute2"])
+        # Reset index for clean output
+        result_df = result_df.reset_index(drop=True)
+    else:
+        # Create an empty DataFrame with the expected columns if no conflicts found
+        result_df = pd.DataFrame(
+            columns=[
+                "MMSI1",
+                "MMSI2",
+                "Timestamp1",
+                "Timestamp2",
+                "Latitude1",
+                "Longitude1",
+                "Latitude2",
+                "Longitude2",
+                "TimeDifference",
+                "DistanceMeters",
+            ]
+        )
 
     print(f"Found {len(result_df)} unique conflicting vessel pairs")
     return result_df

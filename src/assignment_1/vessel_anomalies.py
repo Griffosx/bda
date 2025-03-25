@@ -19,10 +19,6 @@ def detect_vessel_anomalies(
     # Make a copy of the data to avoid modifying the original DataFrame
     vessel_data = vessel_data.copy()
 
-    # Preprocessing - do all column operations at once for better vectorization
-    vessel_data["Latitude"] = vessel_data["Latitude"].clip(lower=-90, upper=90)
-    vessel_data["Longitude"] = vessel_data["Longitude"].clip(lower=-180, upper=180)
-
     # Rename timestamp column if needed and convert to datetime
     if "# Timestamp" in vessel_data.columns:
         vessel_data = vessel_data.rename(columns={"# Timestamp": "Timestamp"})

@@ -137,7 +137,7 @@ def test_boundary_threshold_zero():
     )
 
     # With threshold of 0, no points should be considered near boundary
-    result = preprocess_vessel_temporal_data(data, boundary_threshold=0)
+    result = preprocess_vessel_temporal_data(data, time_boundary_threshold=0)
 
     # Should only be in one bin
     assert len(result) == 1
@@ -156,7 +156,7 @@ def test_boundary_threshold_large():
     )
 
     # With threshold of 30, this point should be considered near boundary to next minute
-    result = preprocess_vessel_temporal_data(data, boundary_threshold=30)
+    result = preprocess_vessel_temporal_data(data, time_boundary_threshold=30)
 
     # Should be in both bins
     assert len(result) == 2

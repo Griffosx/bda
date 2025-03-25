@@ -1,13 +1,16 @@
 import pandas as pd
 from pathlib import Path
 from assignment_1.vessel_anomalies import detect_vessel_anomalies_multi_process
-from assignment_1.location_anomalies import detect_conflicting_locations_single_process
+from assignment_1.location_anomalies import (
+    detect_conflicting_locations_single_process,
+    detect_conflicting_locations_multi_process,
+)
 
 
 BASE_PATH = Path("assets").resolve()
 
 
-def normalize_coordinates(data, precision=4):
+def normalize_coordinates(data, precision=6):
     """
     Normalize latitude and longitude values in a DataFrame.
 
@@ -75,36 +78,12 @@ def main():
     # r1 = detect_vessel_anomalies_single_process(data)
     # vessel_anomalies = detect_vessel_anomalies_multi_process(data)
 
-    location_anomalies = detect_conflicting_locations_single_process(
-        data, lat_bin_size=0.1, lon_bin_size=0.1
-    )
-    # print(location_anomalies)
-
-    # key_cols = ["MMSI", "Timestamp"]
-    # df1_sorted = r1.sort_values(key_cols).reset_index(drop=True)
-    # df2_sorted = r2.sort_values(key_cols).reset_index(drop=True)
-    # print(df1_sorted.equals(df2_sorted))
-
-    # detect_vessel_anomalies_multi_process(data)
-    # print(detect_vessel_anomalies_multi_process(data))
-
-    # vessels = data.groupby("MMSI")
-    # vessles_ids = list(vessels.groups.keys())
-
-    # vessel_id = 111257003
-    # anomalies = detect_vessel_anomalies(
-    #     vessels.get_group(vessel_id), return_entire_dataframe=True
+    # location_anomalies = detect_conflicting_locations_single_process(
+    #     data, lat_bin_size=0.1, lon_bin_size=0.1, time_bin_size="1H"
     # )
-    # print(anomalies)
-
-    # for vessel_id in vessles_ids:
-    #     print(f"Vessel ID: {vessel_id}")
-    #     anomalies = detect_vessels_anomalies(
-    #         vessels.get_group(vessel_id), detect_intrasecond_anomalies=False
-    #     )
-    #     # If there is at least one SOG > 0 print the anomalies
-    #     if anomalies["SOG"].max() > 1:
-    #         print(anomalies)
+    location_anomalies = detect_conflicting_locations_multi_process(
+        data, lat_bin_size=0.1, lon_bin_size=0.1, time_bin_size="1H"
+    )
 
 
 if __name__ == "__main__":
