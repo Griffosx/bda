@@ -115,29 +115,11 @@ def process_spatial_chunk(chunk_data, distance_threshold=100, time_threshold=30)
     return conflict_results
 
 
-"""
-The `preprocess_vessel_data` function:
-
-It receives a dataframe that contains vessel tracking information, typically with columns:
-- `MMSI`: Maritime Mobile Service Identity (unique vessel identifier)
-- `Timestamp` (or `# Timestamp`): Time of the position report
-- `Latitude`: Geographical latitude position
-- `Longitude`: Geographical longitude position
-
-It returns a dataframe with the same information plus:
-- Standardized timestamps in datetime format
-- Added `lat_bin` and `lon_bin` columns that assign each vessel position to geographic grid cells
-- Vessels near bin boundaries appear in multiple bins to ensure no vessel-to-vessel proximity comparisons are missed
-
-This preprocessing is essential for efficiently detecting potential vessel conflicts by limiting comparisons to only vessels in the same or adjacent spatial regions.
-"""
-
-
 def preprocess_vessel_data(
     data, lat_bin_size=0.01, lon_bin_size=0.01, boundary_threshold=0.1, overlap=True
 ):
     """
-    Common preprocessing steps for vessel data.
+    Vectorized version of the vessel data preprocessing function.
 
     Parameters:
     data (pd.DataFrame): Input vessel data
@@ -163,7 +145,7 @@ def preprocess_vessel_data(
 
     # If overlap is disabled, just assign primary bins and return
     if not overlap:
-        # Calculate the primary bin for each point and round to 2 decimals to ensure consistency
+        # Calculate the primary bin for each point
         data["lat_bin"] = (
             np.floor(data["Latitude"] / lat_bin_size) * lat_bin_size
         ).round(2)
@@ -172,62 +154,69 @@ def preprocess_vessel_data(
         ).round(2)
         return data
 
-    # Results container
-    result_rows = []
+    # Calculate primary bins (rounded to 2 decimal places)
+    data["lat_bin"] = (np.floor(data["Latitude"] / lat_bin_size) * lat_bin_size).round(
+        2
+    )
+    data["lon_bin"] = (np.floor(data["Longitude"] / lon_bin_size) * lon_bin_size).round(
+        2
+    )
+
+    # Calculate next bins
+    data["next_lat_bin"] = (data["lat_bin"] + lat_bin_size).round(2)
+    data["next_lon_bin"] = (data["lon_bin"] + lon_bin_size).round(2)
+
+    # Calculate distance to next bin boundaries
+    data["lat_distance"] = (data["next_lat_bin"] - data["Latitude"]).round(10)
+    data["lon_distance"] = (data["next_lon_bin"] - data["Longitude"]).round(10)
 
     # Thresholds for boundary proximity
     lat_threshold = lat_bin_size * boundary_threshold
     lon_threshold = lon_bin_size * boundary_threshold
 
-    for _, row in data.iterrows():
-        # Get original values
-        original_values = {
-            "MMSI": row["MMSI"],
-            "Timestamp": row["Timestamp"],
-            "Latitude": row["Latitude"],
-            "Longitude": row["Longitude"],
-        }
+    # Check if near boundaries
+    data["near_lat_boundary"] = data["lat_distance"] <= (lat_threshold + 1e-10)
+    data["near_lon_boundary"] = data["lon_distance"] <= (lon_threshold + 1e-10)
 
-        # Calculate primary bin (rounded to 2 decimal places)
-        lat_bin = round(np.floor(row["Latitude"] / lat_bin_size) * lat_bin_size, 2)
-        lon_bin = round(np.floor(row["Longitude"] / lon_bin_size) * lon_bin_size, 2)
+    # Create a list to store DataFrames for each case
+    result_dfs = []
 
-        # Calculate next bins (rounded to 2 decimal places to ensure exact 50.02, not 50.019999...)
-        next_lat_bin = round(lat_bin + lat_bin_size, 2)
-        next_lon_bin = round(lon_bin + lon_bin_size, 2)
+    # Case 1: Primary bin (all points)
+    primary_df = data[
+        ["MMSI", "Timestamp", "Latitude", "Longitude", "lat_bin", "lon_bin"]
+    ].copy()
+    result_dfs.append(primary_df)
 
-        # Distance to next bin boundaries
-        lat_distance = round(next_lat_bin - row["Latitude"], 10)
-        lon_distance = round(next_lon_bin - row["Longitude"], 10)
+    # Case 2: Upper latitude bin (points near latitude boundary)
+    lat_boundary_df = data[data["near_lat_boundary"]].copy()
+    if not lat_boundary_df.empty:
+        lat_boundary_df["lat_bin"] = lat_boundary_df["next_lat_bin"]
+        lat_boundary_df = lat_boundary_df[
+            ["MMSI", "Timestamp", "Latitude", "Longitude", "lat_bin", "lon_bin"]
+        ]
+        result_dfs.append(lat_boundary_df)
 
-        # Check if near boundaries (with a tiny epsilon for floating point comparison)
-        near_lat_boundary = lat_distance <= (lat_threshold + 1e-10)
-        near_lon_boundary = lon_distance <= (lon_threshold + 1e-10)
+    # Case 3: Upper longitude bin (points near longitude boundary)
+    lon_boundary_df = data[data["near_lon_boundary"]].copy()
+    if not lon_boundary_df.empty:
+        lon_boundary_df["lon_bin"] = lon_boundary_df["next_lon_bin"]
+        lon_boundary_df = lon_boundary_df[
+            ["MMSI", "Timestamp", "Latitude", "Longitude", "lat_bin", "lon_bin"]
+        ]
+        result_dfs.append(lon_boundary_df)
 
-        # Always add to primary bin
-        bin_combinations = [(lat_bin, lon_bin)]
+    # Case 4: Diagonal bin (points near both boundaries)
+    diagonal_df = data[data["near_lat_boundary"] & data["near_lon_boundary"]].copy()
+    if not diagonal_df.empty:
+        diagonal_df["lat_bin"] = diagonal_df["next_lat_bin"]
+        diagonal_df["lon_bin"] = diagonal_df["next_lon_bin"]
+        diagonal_df = diagonal_df[
+            ["MMSI", "Timestamp", "Latitude", "Longitude", "lat_bin", "lon_bin"]
+        ]
+        result_dfs.append(diagonal_df)
 
-        # If near latitude boundary, add to upper latitude bin
-        if near_lat_boundary:
-            bin_combinations.append((next_lat_bin, lon_bin))
-
-        # If near longitude boundary, add to upper longitude bin
-        if near_lon_boundary:
-            bin_combinations.append((lat_bin, next_lon_bin))
-
-        # If near both boundaries, add to diagonal bin
-        if near_lat_boundary and near_lon_boundary:
-            bin_combinations.append((next_lat_bin, next_lon_bin))
-
-        # Create a row for each bin combination
-        for lat_bin_val, lon_bin_val in bin_combinations:
-            row_data = original_values.copy()
-            row_data["lat_bin"] = lat_bin_val
-            row_data["lon_bin"] = lon_bin_val
-            result_rows.append(row_data)
-
-    # Convert to DataFrame
-    result_df = pd.DataFrame(result_rows)
+    # Combine all DataFrames
+    result_df = pd.concat(result_dfs, ignore_index=True)
 
     return result_df
 

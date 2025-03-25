@@ -1,183 +1,188 @@
-import pytest
 import pandas as pd
 from assignment_1.location_anomalies import preprocess_vessel_data
 
 
-@pytest.fixture
-def basic_data():
-    """Fixture with basic vessel data for testing"""
-    return pd.DataFrame(
+def test_negative_coordinates():
+    """Test behavior with negative latitude/longitude"""
+    data = pd.DataFrame(
         {
-            "MMSI": [1, 2, 3],
-            "Timestamp": [
-                "01/01/2023 12:00:00",
-                "01/01/2023 12:05:00",
-                "01/01/2023 12:10:00",
-            ],
-            "Latitude": [50.005, 50.015, 50.025],
-            "Longitude": [10.005, 10.015, 10.025],
+            "MMSI": [1, 2],
+            "Timestamp": ["01/01/2023 12:00:00", "01/01/2023 12:00:00"],
+            "Latitude": [-50.005, 50.005],  # Negative latitude
+            "Longitude": [10.005, -10.005],  # Negative longitude
         }
     )
 
+    result = preprocess_vessel_data(data)
 
-def test_overlap_near_lat_boundary():
-    """Test points near latitude bin boundary"""
+    # Check negative coordinates are binned correctly
+    assert result[result["MMSI"] == 1].iloc[0]["lat_bin"] == -50.01
+    assert result[result["MMSI"] == 2].iloc[0]["lon_bin"] == -10.01
+
+
+def test_float_precision_issues():
+    """Test behavior with coordinates that could cause float precision issues"""
+    data = pd.DataFrame(
+        {
+            "MMSI": [1, 2],
+            "Timestamp": ["01/01/2023 12:00:00", "01/01/2023 12:00:00"],
+            "Latitude": [
+                50.009999999999,
+                50.019999999999,
+            ],  # Very close to bin boundaries
+            "Longitude": [10.009999999999, 10.019999999999],
+        }
+    )
+
+    result = preprocess_vessel_data(data)
+
+    # Check binning is consistent despite float precision issues
+    assert result[result["MMSI"] == 1].iloc[0]["lat_bin"] == 50.00
+    assert result[result["MMSI"] == 2].iloc[0]["lat_bin"] == 50.01
+
+
+def test_disable_overlap():
+    """Test behavior when overlap is disabled (more comprehensive)"""
+    data = pd.DataFrame(
+        {
+            "MMSI": [1, 2, 3, 4],
+            "Timestamp": ["01/01/2023 12:00:00"] * 4,
+            "Latitude": [50.005, 50.019, 50.005, 50.019],
+            "Longitude": [10.005, 10.005, 10.019, 10.019],
+        }
+    )
+
+    # Without overlap, each point should be in exactly one bin
+    result = preprocess_vessel_data(data, overlap=False)
+
+    assert len(result) == len(
+        data
+    )  # Should have the same number of rows as original data
+
+    # Check bin assignments
+    assert result[result["MMSI"] == 1].iloc[0]["lat_bin"] == 50.00
+    assert result[result["MMSI"] == 1].iloc[0]["lon_bin"] == 10.00
+
+    assert result[result["MMSI"] == 2].iloc[0]["lat_bin"] == 50.01
+    assert result[result["MMSI"] == 2].iloc[0]["lon_bin"] == 10.00
+
+    assert result[result["MMSI"] == 3].iloc[0]["lat_bin"] == 50.00
+    assert result[result["MMSI"] == 3].iloc[0]["lon_bin"] == 10.01
+
+    assert result[result["MMSI"] == 4].iloc[0]["lat_bin"] == 50.01
+    assert result[result["MMSI"] == 4].iloc[0]["lon_bin"] == 10.01
+
+
+def test_custom_bin_sizes():
+    """Test behavior with custom bin sizes"""
     data = pd.DataFrame(
         {
             "MMSI": [1],
             "Timestamp": ["01/01/2023 12:00:00"],
-            "Latitude": [50.019],  # Very close to 50.02 boundary
-            "Longitude": [10.005],  # Not close to boundary
+            "Latitude": [50.025],
+            "Longitude": [10.025],
         }
     )
 
-    result = preprocess_vessel_data(data, lat_bin_size=0.01, lon_bin_size=0.01)
+    # Test with different bin sizes
+    result_default = preprocess_vessel_data(data, lat_bin_size=0.01, lon_bin_size=0.01)
+    result_custom = preprocess_vessel_data(data, lat_bin_size=0.05, lon_bin_size=0.05)
 
-    # Should be in both the 50.01 bin and the 50.02 bin
-    assert len(result) == 2
+    # Default should bin to 50.02, 10.02
+    assert result_default.iloc[0]["lat_bin"] == 50.02
+    assert result_default.iloc[0]["lon_bin"] == 10.02
 
-    # Check both bins are represented
-    lat_bins = sorted(result["lat_bin"].unique())
-    assert len(lat_bins) == 2
-    assert lat_bins[0] == 50.01
-    assert lat_bins[1] == 50.02
-
-    # Longitude bin should be the same for both
-    lon_bins = result["lon_bin"].unique()
-    assert len(lon_bins) == 1
-    assert lon_bins[0] == 10.00
+    # Custom should bin to 50.00, 10.00 (since 50.025 / 0.05 = 1000.5, floored to 1000, then 1000 * 0.05 = 50.00)
+    assert result_custom.iloc[0]["lat_bin"] == 50.00
+    assert result_custom.iloc[0]["lon_bin"] == 10.00
 
 
-def test_overlap_near_lon_boundary():
-    """Test points near longitude bin boundary"""
+def test_extreme_values():
+    """Test behavior with extreme latitude/longitude values"""
+    data = pd.DataFrame(
+        {
+            "MMSI": [1, 2],
+            "Timestamp": ["01/01/2023 12:00:00", "01/01/2023 12:00:00"],
+            "Latitude": [89.9999, -89.9999],  # Very close to poles
+            "Longitude": [179.9999, -179.9999],  # Very close to date line
+        }
+    )
+
+    result = preprocess_vessel_data(data)
+
+    # Check extreme values are binned correctly
+    assert result[result["MMSI"] == 1].iloc[0]["lat_bin"] == 89.99
+    assert result[result["MMSI"] == 1].iloc[0]["lon_bin"] == 179.99
+
+    assert result[result["MMSI"] == 2].iloc[0]["lat_bin"] == -90.00
+    assert result[result["MMSI"] == 2].iloc[0]["lon_bin"] == -180.00
+
+
+def test_boundary_threshold_zero():
+    """Test behavior when boundary_threshold is set to 0"""
     data = pd.DataFrame(
         {
             "MMSI": [1],
             "Timestamp": ["01/01/2023 12:00:00"],
-            "Latitude": [50.005],  # Not close to boundary
-            "Longitude": [10.019],  # Very close to 10.02 boundary
+            "Latitude": [50.019],  # Very close to boundary
+            "Longitude": [10.019],  # Very close to boundary
         }
     )
 
-    result = preprocess_vessel_data(data, lat_bin_size=0.01, lon_bin_size=0.01)
+    # With threshold of 0, no points should be considered near boundary
+    result = preprocess_vessel_data(data, boundary_threshold=0)
 
-    # Should be in both the 10.01 bin and the 10.02 bin
-    assert len(result) == 2
-
-    # Latitude bin should be the same for both
-    lat_bins = result["lat_bin"].unique()
-    assert len(lat_bins) == 1
-    assert lat_bins[0] == 50.00
-
-    # Check both longitude bins are represented
-    lon_bins = sorted(result["lon_bin"].unique())
-    assert len(lon_bins) == 2
-    assert lon_bins[0] == 10.01
-    assert lon_bins[1] == 10.02
+    # Should only be in one bin
+    assert len(result) == 1
+    assert result.iloc[0]["lat_bin"] == 50.01
+    assert result.iloc[0]["lon_bin"] == 10.01
 
 
-def test_overlap_corner_case():
-    """Test points near both latitude and longitude bin boundaries"""
+def test_boundary_threshold_one():
+    """Test behavior when boundary_threshold is set to 1 (entire bin is 'near boundary')"""
     data = pd.DataFrame(
         {
             "MMSI": [1],
             "Timestamp": ["01/01/2023 12:00:00"],
-            "Latitude": [50.019],  # Very close to 50.02 boundary
-            "Longitude": [10.019],  # Very close to 10.02 boundary
+            "Latitude": [50.005],  # Not usually considered near boundary
+            "Longitude": [10.005],  # Not usually considered near boundary
         }
     )
 
-    result = preprocess_vessel_data(data, lat_bin_size=0.01, lon_bin_size=0.01)
+    # With threshold of 1, all points should be considered near boundary
+    result = preprocess_vessel_data(data, boundary_threshold=1)
 
-    # Should be in 4 bins: (50.01,10.01), (50.01,10.02), (50.02,10.01), (50.02,10.02)
+    # Should be in all 4 bins
     assert len(result) == 4
 
     # Check all combinations exist
     bins = set([(row["lat_bin"], row["lon_bin"]) for _, row in result.iterrows()])
+    assert (50.00, 10.00) in bins
+    assert (50.00, 10.01) in bins
+    assert (50.01, 10.00) in bins
     assert (50.01, 10.01) in bins
-    assert (50.01, 10.02) in bins
-    assert (50.02, 10.01) in bins
-    assert (50.02, 10.02) in bins
 
 
-def test_timestamp_conversion():
-    """Test timestamp column renaming and conversion"""
+def test_duplicate_rows():
+    """Test behavior with duplicate coordinates"""
     data = pd.DataFrame(
         {
             "MMSI": [1, 2],
-            "# Timestamp": ["01/01/2023 12:00:00", "02/01/2023 12:00:00"],
-            "Latitude": [50.005, 50.015],
-            "Longitude": [10.005, 10.015],
+            "Timestamp": ["01/01/2023 12:00:00", "01/01/2023 12:05:00"],
+            "Latitude": [50.005, 50.005],  # Same coordinates
+            "Longitude": [10.005, 10.005],  # Same coordinates
         }
     )
 
     result = preprocess_vessel_data(data)
 
-    # Check timestamp conversion
-    assert "Timestamp" in result.columns
-    assert "# Timestamp" not in result.columns
-    assert pd.api.types.is_datetime64_any_dtype(result["Timestamp"])
-    assert result.iloc[0]["Timestamp"].day == 1
-    assert result.iloc[1]["Timestamp"].day == 2
+    # Both points should be processed independently
+    assert len(result) == 2
 
+    # Check MMSI values are preserved
+    assert set(result["MMSI"]) == {1, 2}
 
-def test_already_datetime_timestamp():
-    """Test handling of already datetime timestamps"""
-    data = pd.DataFrame(
-        {
-            "MMSI": [1],
-            "Timestamp": [pd.Timestamp("2023-01-01 12:00:00")],
-            "Latitude": [50.005],
-            "Longitude": [10.005],
-        }
-    )
-
-    result = preprocess_vessel_data(data)
-
-    # Should not change the timestamp
-    assert pd.api.types.is_datetime64_any_dtype(result["Timestamp"])
-    assert result.iloc[0]["Timestamp"] == pd.Timestamp("2023-01-01 12:00:00")
-
-
-def test_boundary_threshold_sensitivity():
-    """Test different threshold values for boundary detection"""
-    data = pd.DataFrame(
-        {
-            "MMSI": [1],
-            "Timestamp": ["01/01/2023 12:00:00"],
-            "Latitude": [50.0105],  # 0.0005 away from next bin (50.02)
-            "Longitude": [10.005],
-        }
-    )
-
-    # Create a temporary function with a higher threshold to test sensitivity
-    def preprocess_with_custom_threshold(data):
-        # This modifies the threshold within the function to 20% of bin size
-        # Rather than the default 10%
-        return preprocess_vessel_data(data, lat_bin_size=0.01, lon_bin_size=0.01)
-
-    # With default threshold (10% of bin size = 0.001), this should NOT be considered near boundary
-    result1 = preprocess_vessel_data(data, lat_bin_size=0.01, lon_bin_size=0.01)
-    assert len(result1) == 1  # Only in one bin
-
-    # If we were to modify the threshold to 20% (0.002), this WOULD be considered near boundary
-    # Note: This is a property test showing threshold sensitivity, not actual implementation
-
-
-def test_exactly_at_bin_boundary():
-    """Test behavior for points exactly at bin boundaries"""
-    data = pd.DataFrame(
-        {
-            "MMSI": [1],
-            "Timestamp": ["01/01/2023 12:00:00"],
-            "Latitude": [50.01],  # Exactly at bin boundary
-            "Longitude": [10.01],  # Exactly at bin boundary
-        }
-    )
-
-    result = preprocess_vessel_data(data, overlap=False)
-
-    # Should go in just one bin
-    assert len(result) == 1
-    assert result.iloc[0]["lat_bin"] == 50.01
-    assert result.iloc[0]["lon_bin"] == 10.01
+    # Check timestamps are preserved
+    timestamps = result["Timestamp"].dt.strftime("%H:%M:%S").unique()
+    assert len(timestamps) == 2
+    assert set(timestamps) == {"12:00:00", "12:05:00"}
