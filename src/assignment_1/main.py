@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 import multiprocessing as mp
 from tqdm import tqdm
@@ -17,68 +18,84 @@ def detect_vessel_anomalies(
     max_time_gap: float = MAX_TIME_GAP,
     return_entire_dataframe: bool = False,
 ) -> pd.DataFrame:
-    # Make a copy of the data to avoid modifying the original DataFrame and to be thread-safe
+    # Make a copy of the data to avoid modifying the original DataFrame
     vessel_data = vessel_data.copy()
 
-    # Cap latitude between -90 and 90
+    # Preprocessing - do all column operations at once for better vectorization
     vessel_data["Latitude"] = vessel_data["Latitude"].clip(lower=-90, upper=90)
-
-    # Cap longitude between -180 and 180
     vessel_data["Longitude"] = vessel_data["Longitude"].clip(lower=-180, upper=180)
 
-    # Add columns distance, delta_time, and speed
+    # Rename timestamp column if needed and convert to datetime
+    if "# Timestamp" in vessel_data.columns:
+        vessel_data = vessel_data.rename(columns={"# Timestamp": "Timestamp"})
+
+    if not pd.api.types.is_datetime64_any_dtype(vessel_data["Timestamp"]):
+        vessel_data["Timestamp"] = pd.to_datetime(
+            vessel_data["Timestamp"], format="%d/%m/%Y %H:%M:%S", errors="coerce"
+        )
+
+    # Drop duplicates and sort by timestamp
+    vessel_data = vessel_data.drop_duplicates().sort_values("Timestamp")
+
+    # Initialize calculation columns
     vessel_data["distance"] = 0.0
     vessel_data["delta_time_seconds"] = 0.0
     vessel_data["delta_time_hours"] = 0.0
     vessel_data["speed"] = 0.0
 
-    # Rename "# Timestamp" to "Timestamp" and convert to datetime
-    vessel_data = vessel_data.rename(columns={"# Timestamp": "Timestamp"})
-    vessel_data["Timestamp"] = pd.to_datetime(
-        vessel_data["Timestamp"], format="%d/%m/%Y %H:%M:%S"
+    # Vectorized calculation of time differences
+    vessel_data["delta_time_seconds"] = (
+        vessel_data["Timestamp"].diff().dt.total_seconds()
+    )
+    vessel_data["delta_time_hours"] = vessel_data["delta_time_seconds"] / 3600
+
+    # Use NumPy for faster distance calculations if possible
+    # Pre-allocate arrays for lat/lon points
+    coords_prev = np.column_stack(
+        (
+            vessel_data["Latitude"].iloc[:-1].values,
+            vessel_data["Longitude"].iloc[:-1].values,
+        )
+    )
+    coords_curr = np.column_stack(
+        (
+            vessel_data["Latitude"].iloc[1:].values,
+            vessel_data["Longitude"].iloc[1:].values,
+        )
     )
 
-    # Drop duplicate rows
-    vessel_data = vessel_data.drop_duplicates()
+    # Calculate distances using vectorized operations
+    distances = np.zeros(len(vessel_data))
 
-    # Calculate distance, time difference, and speed between consecutive points
-    for i in range(1, len(vessel_data)):
-        prev_row = vessel_data.iloc[i - 1]
-        curr_row = vessel_data.iloc[i]
-
-        distance = geopy_distance.distance(
-            (prev_row["Latitude"], prev_row["Longitude"]),
-            (curr_row["Latitude"], curr_row["Longitude"]),
+    for i in range(len(coords_prev)):
+        distances[i + 1] = geopy_distance.distance(
+            (coords_prev[i, 0], coords_prev[i, 1]),
+            (coords_curr[i, 0], coords_curr[i, 1]),
         ).miles
-        # Calculate time difference in hours
-        time_diff = (curr_row["Timestamp"] - prev_row["Timestamp"]).total_seconds()
-        time_diff_hours = time_diff / 3600
 
-        vessel_data.loc[vessel_data.index[i], "distance"] = distance
-        vessel_data.loc[vessel_data.index[i], "delta_time_seconds"] = time_diff
-        vessel_data.loc[vessel_data.index[i], "delta_time_hours"] = time_diff_hours
+    vessel_data["distance"] = distances
 
-        # Calculate speed in miles/h (distance/time)
-        if time_diff > 0:  # Avoid division by zero
-            vessel_data.loc[vessel_data.index[i], "speed"] = distance / time_diff_hours
+    # Calculate speed (vectorized)
+    mask = vessel_data["delta_time_hours"] > 0
+    vessel_data.loc[mask, "speed"] = (
+        vessel_data.loc[mask, "distance"] / vessel_data.loc[mask, "delta_time_hours"]
+    )
 
-    # Detect anomalies
-    # 1. Speed anomalies / position jumps
+    # Detect anomalies (vectorized operations)
     vessel_data["speed_anomaly"] = vessel_data["speed"] > max_vessel_speed
-
-    # 2. AIS gaps (significant time gaps between transmissions)
-    vessel_data["ais_gap"] = (
-        vessel_data["delta_time_hours"] > max_time_gap
-    )  # Gap greater than 1 hour
-
-    # Flag as anomaly if any of the individual anomaly types are detected
+    vessel_data["ais_gap"] = vessel_data["delta_time_hours"] > max_time_gap
     vessel_data["anomaly"] = vessel_data["speed_anomaly"] | vessel_data["ais_gap"]
 
-    # Only keep rows with anomalies
+    # Only keep rows with anomalies if requested
     if not return_entire_dataframe:
         vessel_data = vessel_data[vessel_data["anomaly"]]
 
     return vessel_data
+
+
+def detect_vessel_anomalies_kwwargs(kwargs):
+    """Helper function to unpack arguments for detect_vessel_anomalies"""
+    return detect_vessel_anomalies(**kwargs)
 
 
 @timeit
@@ -90,9 +107,10 @@ def group_by_vessel(data: pd.DataFrame) -> pd.DataFrame:
 def detect_vessel_anomalies_single_process(
     data: pd.DataFrame,
     max_vessel_speed: float = MAX_VESSEL_SPEED,
+    max_time_gap: float = MAX_TIME_GAP,
 ) -> pd.DataFrame:
     all_anomalies = pd.DataFrame()
-    vessels = data.groupby("MMSI")
+    vessels = group_by_vessel(data)
     vessles_ids = list(vessels.groups.keys())
 
     with tqdm(
@@ -100,7 +118,7 @@ def detect_vessel_anomalies_single_process(
     ) as pbar:
         for vessel_id in vessles_ids:
             anomalies = detect_vessel_anomalies(
-                vessels.get_group(vessel_id), max_vessel_speed
+                vessels.get_group(vessel_id), max_vessel_speed, max_time_gap
             )
             all_anomalies = pd.concat([all_anomalies, anomalies])
             pbar.update(1)
@@ -112,31 +130,38 @@ def detect_vessel_anomalies_single_process(
 def detect_vessel_anomalies_multi_process(
     data: pd.DataFrame,
     max_vessel_speed: float = MAX_VESSEL_SPEED,
+    max_time_gap: float = MAX_TIME_GAP,
 ) -> pd.DataFrame:
-    number_of_processes = max(mp.cpu_count() - 1, 1)
+    number_of_processes = mp.cpu_count() - 1
     print(f"Using {number_of_processes} processes.")
 
     # Group data by vessel MMSI
-    vessels = data.groupby("MMSI")
-    vessels_data = [(group.copy(), max_vessel_speed) for _, group in vessels]
+    vessels = group_by_vessel(data)
+    vessels_data = [
+        {
+            "vessel_data": group.copy(),
+            "max_vessel_speed": max_vessel_speed,
+            "max_time_gap": max_time_gap,
+        }
+        for _, group in vessels
+    ]
 
     # Initialize multiprocessing pool
     all_results = []
     with mp.Pool(number_of_processes) as pool:
+        results = pool.imap(detect_vessel_anomalies_kwwargs, vessels_data)
+
         # Create a progress bar for the total number of vessels
         with tqdm(
             total=len(vessels_data), unit="vessel", desc="Processing vessels"
         ) as pbar:
-            # Process each vessel and update the progress bar when a result is ready
-            for result in pool.starmap_async(
-                detect_vessel_anomalies, vessels_data
-            ).get():
+            # Process each result as it completes
+            for result in results:
                 all_results.append(result)
-                pbar.update()
+                pbar.update(1)
 
     # Combine results from all processes
     all_anomalies = pd.concat(all_results, ignore_index=True)
-
     return all_anomalies
 
 
@@ -153,7 +178,15 @@ def main():
     )
 
     # print(detect_vessel_anomalies_single_process(data))
-    detect_vessel_anomalies_multi_process(data)
+    r1 = detect_vessel_anomalies_single_process(data)
+    r2 = detect_vessel_anomalies_multi_process(data)
+
+    key_cols = ["MMSI", "Timestamp"]
+    df1_sorted = r1.sort_values(key_cols).reset_index(drop=True)
+    df2_sorted = r2.sort_values(key_cols).reset_index(drop=True)
+    print(df1_sorted.equals(df2_sorted))
+
+    # detect_vessel_anomalies_multi_process(data)
     # print(detect_vessel_anomalies_multi_process(data))
 
     # vessels = data.groupby("MMSI")
