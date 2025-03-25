@@ -9,3 +9,8 @@ tasks:
   assignment_1:
     cmds:
       - poetry run python src/assignment_1/main.py
+
+  test:
+    desc: Run pytest
+    cmds:
+      - poetry run pytest

@@ -1,18 +1,20 @@
 import pandas as pd
 import multiprocessing as mp
-import timer_wraper
 from tqdm import tqdm
 from pathlib import Path
 from geopy import distance as geopy_distance
+from utils.timer_wrapper import timeit
 
 
 BASE_PATH = Path("~/Projects/bda").expanduser()
-MAX_VESSEL_SPEED = 50.0  # Maximum expected speed in km/h
+MAX_VESSEL_SPEED = 50.0  # Maximum expected speed in miles/h
+MAX_TIME_GAP = 1.0  # Maximum expected time gap between AIS transmissions in hours
 
 
 def detect_vessel_anomalies(
     vessel_data: pd.DataFrame,
     max_vessel_speed: float = MAX_VESSEL_SPEED,
+    max_time_gap: float = MAX_TIME_GAP,
     return_entire_dataframe: bool = False,
 ) -> pd.DataFrame:
     # Make a copy of the data to avoid modifying the original DataFrame and to be thread-safe
@@ -56,7 +58,7 @@ def detect_vessel_anomalies(
         vessel_data.loc[vessel_data.index[i], "delta_time_seconds"] = time_diff
         vessel_data.loc[vessel_data.index[i], "delta_time_hours"] = time_diff_hours
 
-        # Calculate speed in km/h (distance/time)
+        # Calculate speed in miles/h (distance/time)
         if time_diff > 0:  # Avoid division by zero
             vessel_data.loc[vessel_data.index[i], "speed"] = distance / time_diff_hours
 
@@ -66,7 +68,7 @@ def detect_vessel_anomalies(
 
     # 2. AIS gaps (significant time gaps between transmissions)
     vessel_data["ais_gap"] = (
-        vessel_data["delta_time_hours"] > 1.0
+        vessel_data["delta_time_hours"] > max_time_gap
     )  # Gap greater than 1 hour
 
     # Flag as anomaly if any of the individual anomaly types are detected
@@ -79,7 +81,12 @@ def detect_vessel_anomalies(
     return vessel_data
 
 
-@timer_wraper.timeit
+@timeit
+def group_by_vessel(data: pd.DataFrame) -> pd.DataFrame:
+    return data.groupby("MMSI")
+
+
+@timeit
 def detect_vessel_anomalies_single_process(
     data: pd.DataFrame,
     max_vessel_speed: float = MAX_VESSEL_SPEED,
@@ -101,7 +108,7 @@ def detect_vessel_anomalies_single_process(
     return all_anomalies
 
 
-@timer_wraper.timeit
+@timeit
 def detect_vessel_anomalies_multi_process(
     data: pd.DataFrame,
     max_vessel_speed: float = MAX_VESSEL_SPEED,
@@ -114,18 +121,21 @@ def detect_vessel_anomalies_multi_process(
     vessels_data = [(group.copy(), max_vessel_speed) for _, group in vessels]
 
     # Initialize multiprocessing pool
+    all_results = []
     with mp.Pool(number_of_processes) as pool:
-        results = list(
-            tqdm(
-                pool.starmap(detect_vessel_anomalies, vessels_data),
-                total=len(vessels_data),
-                unit="vessel",
-                desc="Processing vessels",
-            )
-        )
+        # Create a progress bar for the total number of vessels
+        with tqdm(
+            total=len(vessels_data), unit="vessel", desc="Processing vessels"
+        ) as pbar:
+            # Process each vessel and update the progress bar when a result is ready
+            for result in pool.starmap_async(
+                detect_vessel_anomalies, vessels_data
+            ).get():
+                all_results.append(result)
+                pbar.update()
 
     # Combine results from all processes
-    all_anomalies = pd.concat(results, ignore_index=True)
+    all_anomalies = pd.concat(all_results, ignore_index=True)
 
     return all_anomalies
 
@@ -142,13 +152,14 @@ def main():
         usecols=["# Timestamp", "MMSI", "Latitude", "Longitude", "SOG"],
     )
 
-    print(detect_vessel_anomalies_single_process(data))
+    # print(detect_vessel_anomalies_single_process(data))
+    detect_vessel_anomalies_multi_process(data)
     # print(detect_vessel_anomalies_multi_process(data))
 
     # vessels = data.groupby("MMSI")
     # vessles_ids = list(vessels.groups.keys())
 
-    # vessel_id = 203504300
+    # vessel_id = 111257003
     # anomalies = detect_vessel_anomalies(
     #     vessels.get_group(vessel_id), return_entire_dataframe=True
     # )
