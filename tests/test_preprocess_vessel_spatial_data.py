@@ -1,5 +1,5 @@
 import pandas as pd
-from assignment_1.location_anomalies import preprocess_vessel_data
+from assignment_1.location_anomalies import preprocess_vessel_spatial_data
 
 
 def test_negative_coordinates():
@@ -13,7 +13,7 @@ def test_negative_coordinates():
         }
     )
 
-    result = preprocess_vessel_data(data)
+    result = preprocess_vessel_spatial_data(data)
 
     # Check negative coordinates are binned correctly
     assert result[result["MMSI"] == 1].iloc[0]["lat_bin"] == -50.01
@@ -34,7 +34,7 @@ def test_float_precision_issues():
         }
     )
 
-    result = preprocess_vessel_data(data)
+    result = preprocess_vessel_spatial_data(data)
 
     # Check binning is consistent despite float precision issues
     assert result[result["MMSI"] == 1].iloc[0]["lat_bin"] == 50.00
@@ -53,7 +53,7 @@ def test_disable_overlap():
     )
 
     # Without overlap, each point should be in exactly one bin
-    result = preprocess_vessel_data(data, overlap=False)
+    result = preprocess_vessel_spatial_data(data, overlap=False)
 
     assert len(result) == len(
         data
@@ -85,8 +85,12 @@ def test_custom_bin_sizes():
     )
 
     # Test with different bin sizes
-    result_default = preprocess_vessel_data(data, lat_bin_size=0.01, lon_bin_size=0.01)
-    result_custom = preprocess_vessel_data(data, lat_bin_size=0.05, lon_bin_size=0.05)
+    result_default = preprocess_vessel_spatial_data(
+        data, lat_bin_size=0.01, lon_bin_size=0.01
+    )
+    result_custom = preprocess_vessel_spatial_data(
+        data, lat_bin_size=0.05, lon_bin_size=0.05
+    )
 
     # Default should bin to 50.02, 10.02
     assert result_default.iloc[0]["lat_bin"] == 50.02
@@ -108,7 +112,7 @@ def test_extreme_values():
         }
     )
 
-    result = preprocess_vessel_data(data)
+    result = preprocess_vessel_spatial_data(data)
 
     # Check extreme values are binned correctly
     assert result[result["MMSI"] == 1].iloc[0]["lat_bin"] == 89.99
@@ -130,7 +134,7 @@ def test_boundary_threshold_zero():
     )
 
     # With threshold of 0, no points should be considered near boundary
-    result = preprocess_vessel_data(data, boundary_threshold=0)
+    result = preprocess_vessel_spatial_data(data, boundary_threshold=0)
 
     # Should only be in one bin
     assert len(result) == 1
@@ -150,7 +154,7 @@ def test_boundary_threshold_one():
     )
 
     # With threshold of 1, all points should be considered near boundary
-    result = preprocess_vessel_data(data, boundary_threshold=1)
+    result = preprocess_vessel_spatial_data(data, boundary_threshold=1)
 
     # Should be in all 4 bins
     assert len(result) == 4
@@ -174,7 +178,7 @@ def test_duplicate_rows():
         }
     )
 
-    result = preprocess_vessel_data(data)
+    result = preprocess_vessel_spatial_data(data)
 
     # Both points should be processed independently
     assert len(result) == 2

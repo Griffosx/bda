@@ -1,121 +1,13 @@
 import pandas as pd
 import numpy as np
-import networkx as nx
-from geopy import distance as geopy_distance
 import multiprocessing as mp
 from tqdm import tqdm
 from functools import partial
 from utils.timer_wrapper import timeit
 
 
-def process_spatial_chunk(chunk_data, distance_threshold=100, time_threshold=30):
-    """
-    Process a spatial chunk of data to find conflicting vessel locations.
-    This function is designed to be run in parallel.
-
-    Parameters:
-    chunk_data (pd.DataFrame): DataFrame containing vessel data for a specific spatial bin
-    distance_threshold (float): Maximum distance in meters to consider conflicting
-    time_threshold (float): Maximum time difference in seconds to consider conflicting
-
-    Returns:
-    list: List of dictionaries containing conflicting vessel pairs
-    """
-    # Skip if only one vessel in this area
-    if chunk_data["MMSI"].nunique() <= 1:
-        return []
-
-    # Create time bins (1-minute intervals)
-    min_time = chunk_data["Timestamp"].min()
-    max_time = chunk_data["Timestamp"].max()
-
-    # Generate minute intervals with buffer
-    start_times = pd.date_range(
-        start=min_time - pd.Timedelta(seconds=10), end=max_time, freq="1min"
-    )
-
-    conflict_results = []
-
-    # Process each time interval
-    for start_time in start_times:
-        end_time = start_time + pd.Timedelta(seconds=70)  # 1 min + 10 sec buffer
-
-        # Get data points in this time window
-        time_window_data = chunk_data[
-            (chunk_data["Timestamp"] >= start_time)
-            & (chunk_data["Timestamp"] <= end_time)
-        ]
-
-        # Skip if only one vessel in this time window
-        if time_window_data["MMSI"].nunique() <= 1:
-            continue
-
-        # Use NetworkX for finding conflicts
-        G = nx.Graph()
-
-        # Add nodes
-        for idx, row in time_window_data.iterrows():
-            G.add_node(
-                idx,
-                mmsi=row["MMSI"],
-                lat=row["Latitude"],
-                lon=row["Longitude"],
-                timestamp=row["Timestamp"],
-            )
-
-        # Add edges between different vessels that are close in time
-        node_list = list(G.nodes(data=True))
-        for i in range(len(node_list)):
-            node1_id, node1_data = node_list[i]
-
-            for j in range(i + 1, len(node_list)):
-                node2_id, node2_data = node_list[j]
-
-                # Skip if same vessel
-                if node1_data["mmsi"] == node2_data["mmsi"]:
-                    continue
-
-                # Calculate time difference
-                time_diff = abs(
-                    (node1_data["timestamp"] - node2_data["timestamp"]).total_seconds()
-                )
-
-                # Skip if time difference > threshold
-                if time_diff > time_threshold:
-                    continue
-
-                # Calculate spatial distance
-                point1 = (node1_data["lat"], node1_data["lon"])
-                point2 = (node2_data["lat"], node2_data["lon"])
-
-                # Calculate distance in meters
-                dist_meters = geopy_distance.distance(point1, point2).meters
-
-                # Add edge if distance < threshold
-                if dist_meters < distance_threshold:
-                    G.add_edge(
-                        node1_id, node2_id, distance=dist_meters, time_diff=time_diff
-                    )
-
-                    # Add to results
-                    conflict_pair = {
-                        "mmsi1": node1_data["mmsi"],
-                        "mmsi2": node2_data["mmsi"],
-                        "lat1": node1_data["lat"],
-                        "lon1": node1_data["lon"],
-                        "lat2": node2_data["lat"],
-                        "lon2": node2_data["lon"],
-                        "timestamp1": node1_data["timestamp"],
-                        "timestamp2": node2_data["timestamp"],
-                        "distance_meters": dist_meters,
-                        "time_diff_seconds": time_diff,
-                    }
-                    conflict_results.append(conflict_pair)
-
-    return conflict_results
-
-
-def preprocess_vessel_data(
+@timeit
+def preprocess_vessel_spatial_data(
     data, lat_bin_size=0.01, lon_bin_size=0.01, boundary_threshold=0.1, overlap=True
 ):
     """
@@ -222,12 +114,197 @@ def preprocess_vessel_data(
 
 
 @timeit
+def preprocess_vessel_temporal_data(
+    data, time_bin_size="1min", boundary_threshold=10, overlap=True
+):
+    """
+    Cluster vessel data into temporal bins based on Timestamp.
+    Assumes all data are from the same day.
+
+    Parameters:
+    data (pd.DataFrame): Input vessel data
+    time_bin_size (str): Size of time bins as pandas frequency string (e.g., '1min' for minutes, '1H' for hourly)
+    boundary_threshold (int): Threshold in seconds to consider a point near the boundary
+    overlap (bool): Whether to handle points near bin boundaries by placing them in multiple bins
+
+    Returns:
+    pd.DataFrame: Processed data with time bin assignments
+    """
+    # Make a copy of the data to avoid modifying the original DataFrame
+    data = data.copy()
+
+    # Handle deprecated 'H' in time_bin_size
+    if isinstance(time_bin_size, str) and "H" in time_bin_size:
+        time_bin_size = time_bin_size.replace("H", "h")
+
+    # Ensure timestamp is in datetime format
+    if "# Timestamp" in data.columns:
+        data = data.rename(columns={"# Timestamp": "Timestamp"})
+
+    if not pd.api.types.is_datetime64_any_dtype(data["Timestamp"]):
+        data["Timestamp"] = pd.to_datetime(
+            data["Timestamp"], format="%d/%m/%Y %H:%M:%S", errors="coerce"
+        )
+
+    # Since all data are from the same day, extract the base date once
+    base_date = data["Timestamp"].dt.floor("D").iloc[0]
+
+    # Add time-of-day column for easier time bin calculations
+    data["time_of_day"] = data["Timestamp"].dt.time
+
+    # Parse time_bin_size to get timedelta
+    bin_timedelta = pd.Timedelta(time_bin_size)
+
+    # If overlap is disabled, just assign primary bins and return
+    if not overlap:
+        # Calculate the primary bin for each point using dt.floor()
+        data["time_bin"] = data["Timestamp"].dt.floor(time_bin_size)
+        return data
+
+    # Calculate primary time bins (using time-of-day aware flooring)
+    data["time_bin"] = data["Timestamp"].dt.floor(time_bin_size)
+
+    # Calculate next time bins
+    data["next_time_bin"] = data["time_bin"] + bin_timedelta
+
+    # Handle the case of midnight crossing if bins go to the next day
+    midnight = pd.Timestamp(base_date.date() + pd.Timedelta(days=1))
+    data.loc[data["next_time_bin"] >= midnight, "next_time_bin"] = (
+        midnight - pd.Timedelta(microseconds=1)
+    )
+
+    # Calculate distance to next bin boundary (in seconds for easier threshold comparison)
+    data["time_distance"] = (
+        data["next_time_bin"] - data["Timestamp"]
+    ).dt.total_seconds()
+
+    # Boundary threshold is already in seconds, so we use it directly
+
+    # Check if near boundary
+    data["near_time_boundary"] = data["time_distance"] <= boundary_threshold
+
+    # Create a list to store DataFrames for each case
+    result_dfs = []
+
+    # Define columns to select: all original columns plus time_bin
+    # (excluding internal calculation columns)
+    internal_cols = [
+        "next_time_bin",
+        "time_distance",
+        "near_time_boundary",
+        "time_of_day",
+    ]
+    output_cols = [
+        col for col in data.columns if col not in internal_cols and col != "time_bin"
+    ] + ["time_bin"]
+
+    # Case 1: Primary bin (all points)
+    primary_df = data[output_cols].copy()
+    result_dfs.append(primary_df)
+
+    # Case 2: Upper time bin (points near time boundary)
+    time_boundary_df = data[data["near_time_boundary"]].copy()
+    if not time_boundary_df.empty:
+        time_boundary_df["time_bin"] = time_boundary_df["next_time_bin"]
+        time_boundary_df = time_boundary_df[output_cols]
+        result_dfs.append(time_boundary_df)
+
+    # Combine all DataFrames
+    result_df = pd.concat(result_dfs, ignore_index=True)
+
+    return result_df
+
+
+def process_chunk(chunk_data, distance_threshold=None, time_threshold=None):
+    """
+    Process a chunk of vessel location data to find conflicts with exact position and time matches.
+    Highly optimized version that only identifies different vessels (MMSIs) at identical positions.
+
+    Parameters:
+    chunk_data (pd.DataFrame): DataFrame with vessel location data for a specific bin
+    distance_threshold, time_threshold: Kept for backward compatibility but not used
+
+    Returns:
+    list: List of dictionaries containing pairs of conflicting vessel records
+    """
+    # Initialize results list
+    conflicts = []
+
+    # Round coordinates to a fixed precision to handle minor floating-point differences
+    precision = 6
+    chunk_data["Lat_rounded"] = chunk_data["Latitude"].round(precision)
+    chunk_data["Lon_rounded"] = chunk_data["Longitude"].round(precision)
+
+    # Create a position-time hash for efficient lookup
+    chunk_data["pos_time_hash"] = (
+        chunk_data["Timestamp"].astype(str)
+        + "_"
+        + chunk_data["Lat_rounded"].astype(str)
+        + "_"
+        + chunk_data["Lon_rounded"].astype(str)
+    )
+
+    # Find duplicated position-time hashes (exact same position and time)
+    # Get counts of each position-time hash
+    hash_counts = chunk_data["pos_time_hash"].value_counts()
+
+    # Filter to only include hashes that appear more than once
+    conflicting_hashes = hash_counts[hash_counts > 1].index
+
+    # If no conflicts found, return empty list
+    if len(conflicting_hashes) == 0:
+        return conflicts
+
+    # Filter to only records with conflicting position-time hashes
+    potential_conflicts = chunk_data[
+        chunk_data["pos_time_hash"].isin(conflicting_hashes)
+    ]
+
+    # Group by position-time hash
+    for pos_time_hash, group in potential_conflicts.groupby("pos_time_hash"):
+        # Only proceed if we have different MMSIs
+        if len(group["MMSI"].unique()) > 1:
+            # Extract timestamp from first record (all records in group have same timestamp)
+            timestamp = group["Timestamp"].iloc[0]
+
+            # Get all pairs of vessels in conflict (with different MMSIs)
+            vessels = group[["MMSI", "Latitude", "Longitude"]].values
+            for i in range(len(vessels)):
+                for j in range(i + 1, len(vessels)):
+                    mmsi1, lat1, lon1 = vessels[i]
+                    mmsi2, lat2, lon2 = vessels[j]
+
+                    # Skip if same MMSI (shouldn't happen with our groupby, but just to be safe)
+                    if mmsi1 == mmsi2:
+                        continue
+
+                    # Create conflict record
+                    conflict = {
+                        "MMSI1": int(mmsi1),
+                        "MMSI2": int(mmsi2),
+                        "Timestamp1": timestamp,
+                        "Timestamp2": timestamp,
+                        "Latitude1": lat1,
+                        "Longitude1": lon1,
+                        "Latitude2": lat2,
+                        "Longitude2": lon2,
+                        "TimeDifference": 0.0,
+                        "DistanceMeters": 0.0,
+                    }
+                    conflicts.append(conflict)
+
+    return conflicts
+
+
+@timeit
 def detect_conflicting_locations_single_process(
     data: pd.DataFrame,
     distance_threshold: float = 100,  # meters
     time_threshold: float = 30,  # seconds
-    lat_bin_size: float = 0.01,  # ~1.1km at equator
+    lat_bin_size: float = 0.01,  # ~1km on average
     lon_bin_size: float = 0.01,  # varies with latitude
+    time_bin_size: str = "1min",
+    boundary_threshold: int = 10,
 ) -> pd.DataFrame:
     """
     Detect vessel locations that are suspiciously close in both space and time
@@ -245,61 +322,67 @@ def detect_conflicting_locations_single_process(
     pd.DataFrame: DataFrame with pairs of conflicting vessel locations
     """
     # Preprocess the data
-    data = preprocess_vessel_data(
+    data = preprocess_vessel_spatial_data(
         data, lat_bin_size=lat_bin_size, lon_bin_size=lon_bin_size
     )
-
-    # Group by spatial bins
-    spatial_groups = data.groupby(["lat_bin", "lon_bin"])
-    print(f"Processing {len(spatial_groups)} spatial bins")
+    data = preprocess_vessel_temporal_data(
+        data, time_bin_size=time_bin_size, boundary_threshold=boundary_threshold
+    )
+    # Group by spatial and temporal bins
+    chunks = data.groupby(["lat_bin", "lon_bin", "time_bin"])
+    print(f"Processing {len(chunks)} bins")
 
     # Initialize results
     all_results = []
 
     # Process each spatial bin sequentially with progress bar
-    with tqdm(
-        total=len(spatial_groups), unit="bin", desc="Processing spatial bins"
-    ) as pbar:
-        for _, chunk_data in spatial_groups:
-            chunk_results = process_spatial_chunk(
+    with tqdm(total=len(chunks), unit="bin", desc="Processing spatial bins") as pbar:
+        for _, chunk_data in chunks:
+            chunk_results = process_chunk(
                 chunk_data, distance_threshold, time_threshold
             )
             all_results.extend(chunk_results)
             pbar.update(1)
 
-    # If no conflicts found, return empty DataFrame
-    if not all_results:
-        return pd.DataFrame(
-            columns=[
-                "mmsi1",
-                "mmsi2",
-                "lat1",
-                "lon1",
-                "lat2",
-                "lon2",
-                "timestamp1",
-                "timestamp2",
-                "distance_meters",
-                "time_diff_seconds",
-            ]
+    # Convert results to DataFrame
+    if all_results:
+        result_df = pd.DataFrame(all_results)
+
+        # Remove duplicates based on the vessel pairs
+        # Two vessels might conflict multiple times, so create a unique ID for each pair
+        result_df["pair_id"] = result_df.apply(
+            lambda row: tuple(sorted([row["MMSI1"], row["MMSI2"]])), axis=1
         )
 
-    # Convert results to DataFrame and remove duplicates
-    result_df = pd.DataFrame(all_results)
+        # Get the conflict with the smallest distance for each pair
+        result_df = result_df.loc[
+            result_df.groupby("pair_id")["DistanceMeters"].idxmin()
+        ]
 
-    # Remove duplicates by standardizing vessel ordering
-    result_df["mmsi_min"] = result_df[["mmsi1", "mmsi2"]].min(axis=1)
-    result_df["mmsi_max"] = result_df[["mmsi1", "mmsi2"]].max(axis=1)
-    result_df["minute1"] = result_df["timestamp1"].dt.floor("min")
-    result_df["minute2"] = result_df["timestamp2"].dt.floor("min")
+        # Drop the helper column
+        result_df = result_df.drop(columns=["pair_id"])
 
-    # Keep only unique combinations
-    result_df = result_df.drop_duplicates(
-        subset=["mmsi_min", "mmsi_max", "minute1", "minute2"]
-    )
+        # Sort results by distance
+        result_df = result_df.sort_values("DistanceMeters")
 
-    # Drop helper columns
-    result_df = result_df.drop(columns=["mmsi_min", "mmsi_max", "minute1", "minute2"])
+        # Reset index for clean output
+        result_df = result_df.reset_index(drop=True)
+    else:
+        # Create an empty DataFrame with the expected columns if no conflicts found
+        result_df = pd.DataFrame(
+            columns=[
+                "MMSI1",
+                "MMSI2",
+                "Timestamp1",
+                "Timestamp2",
+                "Latitude1",
+                "Longitude1",
+                "Latitude2",
+                "Longitude2",
+                "TimeDifference",
+                "DistanceMeters",
+            ]
+        )
 
     print(f"Found {len(result_df)} unique conflicting vessel pairs")
     return result_df
@@ -333,7 +416,7 @@ def detect_conflicting_locations_multi_process(
     print(f"Using {number_of_processes} processes.")
 
     # Preprocess the data
-    data = preprocess_vessel_data(data)
+    data = preprocess_vessel_spatial_data(data)
 
     # Group by spatial bins
     spatial_groups = data.groupby(["lat_bin", "lon_bin"])
