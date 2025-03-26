@@ -1,6 +1,10 @@
 import pandas as pd
 from pathlib import Path
-from assignment_1.vessel_anomalies import detect_vessel_anomalies_multi_process
+from utils.timer_wrapper import timeit
+from assignment_1.vessel_anomalies import (
+    detect_vessel_anomalies_single_process,
+    detect_vessel_anomalies_multi_process,
+)
 from assignment_1.location_anomalies import (
     detect_conflicting_locations_single_process,
     detect_conflicting_locations_multi_process,
@@ -54,9 +58,8 @@ def normalize_coordinates(data, precision=6):
     return df
 
 
-def main():
-    pd.set_option("display.max_rows", None)
-
+@timeit
+def main_multiprocess():
     data = pd.read_csv(
         # BASE_PATH / "test.csv",
         BASE_PATH / "aisdk-2024-06-30.csv",
@@ -71,20 +74,42 @@ def main():
     )
     # Remove all Type of mobile that are "Base Station"
     data = data[data["Type of mobile"] != "Base Station"]
-    # Remove column "Type of mobile"
+    # Remove column "Type of mobile", not needed anymore
     data = data.drop(columns=["Type of mobile"])
     data = normalize_coordinates(data)
 
-    # r1 = detect_vessel_anomalies_single_process(data)
-    # vessel_anomalies = detect_vessel_anomalies_multi_process(data)
-
-    # location_anomalies = detect_conflicting_locations_single_process(
-    #     data, lat_bin_size=0.1, lon_bin_size=0.1, time_bin_size="1H"
-    # )
+    vessel_anomalies = detect_vessel_anomalies_multi_process(data)
     location_anomalies = detect_conflicting_locations_multi_process(
         data, lat_bin_size=0.1, lon_bin_size=0.1, time_bin_size="1H"
     )
 
 
+@timeit
+def main_single_process():
+    data = pd.read_csv(
+        # BASE_PATH / "test.csv",
+        BASE_PATH / "aisdk-2024-06-30.csv",
+        usecols=[
+            "# Timestamp",
+            "Type of mobile",
+            "MMSI",
+            "Latitude",
+            "Longitude",
+            "SOG",
+        ],
+    )
+    # Remove all Type of mobile that are "Base Station"
+    data = data[data["Type of mobile"] != "Base Station"]
+    # Remove column "Type of mobile", not needed anymore
+    data = data.drop(columns=["Type of mobile"])
+    data = normalize_coordinates(data)
+
+    vessel_anomalies = detect_vessel_anomalies_single_process(data)
+    location_anomalies = detect_conflicting_locations_single_process(
+        data, lat_bin_size=0.1, lon_bin_size=0.1, time_bin_size="1H"
+    )
+
+
 if __name__ == "__main__":
-    main()
+    pd.set_option("display.max_rows", None)
+    main_multiprocess()
