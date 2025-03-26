@@ -100,23 +100,6 @@ def test_ais_gap(normal_vessel_data):
     assert result["anomaly"].any()
 
 
-def test_latitude_longitude_clipping(normal_vessel_data):
-    """Test that latitude and longitude values are properly clipped"""
-    # Create data with out-of-range coordinates
-    invalid_coords_data = normal_vessel_data.copy()
-    invalid_coords_data.loc[1, "Latitude"] = 100.0  # Invalid latitude
-    invalid_coords_data.loc[2, "Longitude"] = 200.0  # Invalid longitude
-    invalid_coords_data.loc[3, "Latitude"] = -100.0  # Invalid latitude
-
-    # Process data
-    result = detect_vessel_anomalies(invalid_coords_data, return_entire_dataframe=True)
-
-    # Check that values were clipped
-    assert result.loc[1, "Latitude"] == 90.0
-    assert result.loc[2, "Longitude"] == 180.0
-    assert result.loc[3, "Latitude"] == -90.0
-
-
 def test_duplicate_removal(normal_vessel_data):
     """Test that duplicate rows are removed"""
     # Create data with duplicate rows

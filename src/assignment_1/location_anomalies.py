@@ -6,17 +6,20 @@ from tqdm import tqdm
 from utils.timer_wrapper import timeit
 
 
-DISTANCE_THRESHOLD = 100  # meters
-TIME_THRESHOLD = 30  # seconds
 LAT_BIN_SIZE = 0.01  # ~1km on average
 LON_BIN_SIZE = 0.01  # varies with latitude
+SPATIAL_BOUNDARY_THRESHOLD = 0.1  # 10% of bin size
 TIME_BIN_SIZE = "1min"
 TIME_BOUNDARY_THRESHOLD = 10  # seconds
 
 
 @timeit
 def preprocess_vessel_spatial_data(
-    data, lat_bin_size=0.01, lon_bin_size=0.01, boundary_threshold=0.1, overlap=True
+    data,
+    lat_bin_size=LAT_BIN_SIZE,
+    lon_bin_size=LON_BIN_SIZE,
+    boundary_threshold=SPATIAL_BOUNDARY_THRESHOLD,
+    overlap=True,
 ):
     """
     Vectorized version of the vessel data preprocessing function.
@@ -135,7 +138,7 @@ def preprocess_vessel_temporal_data(
     Parameters:
     data (pd.DataFrame): Input vessel data
     time_bin_size (str): Size of time bins as pandas frequency string (e.g., '1min' for minutes, '1H' for hourly)
-    boundary_threshold (int): Threshold in seconds to consider a point near the boundary
+    time_boundary_threshold (int): Threshold in seconds to consider a point near the boundary
     overlap (bool): Whether to handle points near bin boundaries by placing them in multiple bins
 
     Returns:
@@ -230,17 +233,23 @@ def preprocess_data(
     data,
     lat_bin_size: float = LAT_BIN_SIZE,
     lon_bin_size: float = LON_BIN_SIZE,
+    spatial_boundary_threshold: float = SPATIAL_BOUNDARY_THRESHOLD,
     time_bin_size: str = TIME_BIN_SIZE,
-    boundary_threshold: int = TIME_BOUNDARY_THRESHOLD,
+    time_boundary_threshold: int = TIME_BOUNDARY_THRESHOLD,
 ):
     """
     Preprocess vessel location data by spatial and temporal binning and create chunks for processing.
     """
     data = preprocess_vessel_spatial_data(
-        data, lat_bin_size=lat_bin_size, lon_bin_size=lon_bin_size
+        data,
+        lat_bin_size=lat_bin_size,
+        lon_bin_size=lon_bin_size,
+        boundary_threshold=spatial_boundary_threshold,
     )
     data = preprocess_vessel_temporal_data(
-        data, time_bin_size=time_bin_size, time_boundary_threshold=boundary_threshold
+        data,
+        time_bin_size=time_bin_size,
+        time_boundary_threshold=time_boundary_threshold,
     )
     # Group by spatial and temporal bins
     chunks = data.groupby(["lat_bin", "lon_bin", "time_bin"])
@@ -333,6 +342,7 @@ def detect_conflicting_locations_single_process(
     data: pd.DataFrame,
     lat_bin_size: float = LAT_BIN_SIZE,
     lon_bin_size: float = LON_BIN_SIZE,
+    spatial_boundary_threshold: float = SPATIAL_BOUNDARY_THRESHOLD,
     time_bin_size: str = TIME_BIN_SIZE,
     time_boundary_threshold: int = TIME_BOUNDARY_THRESHOLD,
 ) -> pd.DataFrame:
@@ -346,7 +356,12 @@ def detect_conflicting_locations_single_process(
     pd.DataFrame: DataFrame with pairs of conflicting vessel locations
     """
     chunks = preprocess_data(
-        data, lat_bin_size, lon_bin_size, time_bin_size, time_boundary_threshold
+        data,
+        lat_bin_size,
+        lon_bin_size,
+        spatial_boundary_threshold,
+        time_bin_size,
+        time_boundary_threshold,
     )
 
     # Initialize results
@@ -408,6 +423,7 @@ def detect_conflicting_locations_multi_process(
     data: pd.DataFrame,
     lat_bin_size: float = LAT_BIN_SIZE,
     lon_bin_size: float = LON_BIN_SIZE,
+    spatial_boundary_threshold: float = SPATIAL_BOUNDARY_THRESHOLD,
     time_bin_size: str = TIME_BIN_SIZE,
     time_boundary_threshold: int = TIME_BOUNDARY_THRESHOLD,
 ) -> pd.DataFrame:
@@ -425,7 +441,12 @@ def detect_conflicting_locations_multi_process(
     print(f"Using {number_of_processes} processes.")
 
     chunks = preprocess_data(
-        data, lat_bin_size, lon_bin_size, time_bin_size, time_boundary_threshold
+        data,
+        lat_bin_size,
+        lon_bin_size,
+        spatial_boundary_threshold,
+        time_bin_size,
+        time_boundary_threshold,
     )
 
     # Group by spatial and temporal bins and extract dataframes only

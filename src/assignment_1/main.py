@@ -82,6 +82,7 @@ def main_multiprocess():
     location_anomalies = detect_conflicting_locations_multi_process(
         data, lat_bin_size=0.1, lon_bin_size=0.1, time_bin_size="1H"
     )
+    return vessel_anomalies, location_anomalies
 
 
 @timeit
@@ -108,8 +109,30 @@ def main_single_process():
     location_anomalies = detect_conflicting_locations_single_process(
         data, lat_bin_size=0.1, lon_bin_size=0.1, time_bin_size="1H"
     )
+    return vessel_anomalies, location_anomalies
+
+
+def main(mono=False, multi=False):
+    pd.set_option("display.max_rows", None)
+
+    if multi:
+        vessel_anomalies_multi, location_anomalies_multi = main_multiprocess()
+        vessel_anomalies_multi.sort_values(
+            ["MMSI", "Timestamp", "Latitude", "Longitude"]
+        )
+        location_anomalies_multi.sort_values(
+            ["MMSI1", "MMSI2", "Timestamp1", "Timestamp2"]
+        )
+
+    if mono:
+        vessel_anomalies_mono, location_anomalies_mono = main_single_process()
+        vessel_anomalies_mono.sort_values(
+            ["MMSI", "Timestamp", "Latitude", "Longitude"]
+        )
+        location_anomalies_mono.sort_values(
+            ["MMSI1", "MMSI2", "Timestamp1", "Timestamp2"]
+        )
 
 
 if __name__ == "__main__":
-    pd.set_option("display.max_rows", None)
-    main_multiprocess()
+    main(multi=True, mono=True)
